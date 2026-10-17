@@ -1,0 +1,74 @@
+name: Build PPSSPP Web and deploy to Netlify
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy PPSSPP Web
+    runs-on: ubuntu-latest
+    container:
+      image: emscripten/emsdk:5.0.7
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Checkout PPSSPP WASM
+        uses: actions/checkout@v6
+        with:
+          repository: root-hunter/ppsspp-wasm
+          ref: wasm
+          path: ppsspp-wasm-src
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Configure Git safe directory
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/ppsspp-wasm-src"
+
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ninja-build ca-certificates
+
+      - name: Build WebAssembly runtime
+        run: make wasm-release WASM_ROOT=ppsspp-wasm-src CMAKE=/usr/bin/cmake WASM_JOBS="-j$(nproc)"
+
+      - name: Install Angular dependencies
+        run: npm --prefix wasm-page ci
+
+      - name: Build static application
+        run: make app-build-pages WASM_ROOT=ppsspp-wasm-src
+
+      - name: Add cross-origin isolation headers
+        run: |
+          cat > wasm-page/dist/ppsspp-web/_headers <<'EOF'
+          /*
+            Cross-Origin-Opener-Policy: same-origin
+            Cross-Origin-Embedder-Policy: require-corp
+            Cross-Origin-Resource-Policy: same-origin
+          EOF
+          cat > wasm-page/dist/ppsspp-web/_redirects <<'EOF'
+          /* /index.html 200
+          EOF
+          test -f wasm-page/dist/ppsspp-web/_headers
+          test -f wasm-page/dist/ppsspp-web/index.html
+
+      - name: Deploy to Netlify
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          if [ -z "$NETLIFY_AUTH_TOKEN" ] || [ -z "$NETLIFY_SITE_ID" ]; then
+            echo "Configure NETLIFY_AUTH_TOKEN and NETLIFY_SITE_ID in GitHub repository Actions secrets."
+            exit 1
+          fi
+          npm install --global netlify-cli
+          netlify deploy --dir=wasm-page/dist/ppsspp-web --prod --site="$NETLIFY_SITE_ID"
